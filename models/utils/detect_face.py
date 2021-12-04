@@ -16,7 +16,7 @@ except:
 def fixed_batch_process(im_data, model):
     batch_size = 512
     out = []
-    for i in range(0, len(im_data), batch_size):
+    for i in range(0, im_data.shape[0], batch_size):
         batch = im_data[i:(i+batch_size)]
         out.append(model(batch))
 
@@ -28,7 +28,7 @@ def detect_face(imgs, minsize, pnet, rnet, onet, threshold, factor, device):
             imgs = torch.as_tensor(imgs.copy(), device=device)
 
         if isinstance(imgs,torch.Tensor):
-            imgs = torch.as_tensor(imgs, device=device)
+            imgs = imgs.to(device)
 
         if len(imgs.shape) == 3:
             imgs = imgs.unsqueeze(0)
@@ -45,10 +45,10 @@ def detect_face(imgs, minsize, pnet, rnet, onet, threshold, factor, device):
     model_dtype = next(pnet.parameters()).dtype
     imgs = imgs.permute(0, 3, 1, 2).type(model_dtype)
 
-    batch_size = len(imgs)
-    h, w = imgs.shape[2:4]
+    batch_size = imgs.shape[0]
+    size = torch.tensor(imgs.shape[2:4])
     m = 12.0 / minsize
-    minl = min(h, w)
+    minl = torch.min(size)
     minl = minl * m
 
     # Create scale pyramid
@@ -68,7 +68,8 @@ def detect_face(imgs, minsize, pnet, rnet, onet, threshold, factor, device):
     all_i = 0
     offset = 0
     for scale in scales:
-        im_data = imresample(imgs, (int(h * scale + 1), int(w * scale + 1)))
+        scaled_size = size*scale + 1
+        im_data = imresample(imgs, scaled_size)
         im_data = (im_data - 127.5) * 0.0078125
         reg, probs = pnet(im_data)
     
@@ -101,12 +102,12 @@ def detect_face(imgs, minsize, pnet, rnet, onet, threshold, factor, device):
     qq4 = boxes[:, 3] + boxes[:, 8] * regh
     boxes = torch.stack([qq1, qq2, qq3, qq4, boxes[:, 4]]).permute(1, 0)
     boxes = rerec(boxes)
-    y, ey, x, ex = pad(boxes, w, h)
+    y, ey, x, ex = pad(boxes, size)
     
     # Second stage
-    if len(boxes) > 0:
+    if boxes.shape[0] > 0:
         im_data = []
-        for k in range(len(y)):
+        for k in range(y.shape[0]):
             if ey[k] > (y[k] - 1) and ex[k] > (x[k] - 1):
                 img_k = imgs[image_inds[k], :, (y[k] - 1):ey[k], (x[k] - 1):ex[k]].unsqueeze(0)
                 im_data.append(imresample(img_k, (24, 24)))
@@ -132,10 +133,10 @@ def detect_face(imgs, minsize, pnet, rnet, onet, threshold, factor, device):
 
     # Third stage
     points = torch.zeros(0, 5, 2, device=device)
-    if len(boxes) > 0:
-        y, ey, x, ex = pad(boxes, w, h)
+    if boxes.shape[0] > 0:
+        y, ey, x, ex = pad(boxes, size)
         im_data = []
-        for k in range(len(y)):
+        for k in range(y.shape[0]):
             if ey[k] > (y[k] - 1) and ex[k] > (x[k] - 1):
                 img_k = imgs[image_inds[k], :, (y[k] - 1):ey[k], (x[k] - 1):ex[k]].unsqueeze(0)
                 im_data.append(imresample(img_k, (48, 48)))
@@ -164,23 +165,19 @@ def detect_face(imgs, minsize, pnet, rnet, onet, threshold, factor, device):
         boxes = bbreg(boxes, mv)
 
         # NMS within each image using "Min" strategy
-        # pick = batched_nms(boxes[:, :4], boxes[:, 4], image_inds, 0.7)
-        pick = batched_nms_numpy(boxes[:, :4], boxes[:, 4], image_inds, 0.7, 'Min')
+        pick = batched_nms(boxes[:, :4], boxes[:, 4], image_inds, 0.7)
+        #pick = batched_nms_numpy(boxes[:, :4], boxes[:, 4], image_inds, 0.7, 'Min')
         boxes, image_inds, points = boxes[pick], image_inds[pick], points[pick]
 
-    boxes = boxes.cpu().numpy()
-    points = points.cpu().numpy()
-
-    image_inds = image_inds.cpu()
 
     batch_boxes = []
     batch_points = []
     for b_i in range(batch_size):
-        b_i_inds = np.where(image_inds == b_i)
-        batch_boxes.append(boxes[b_i_inds].copy())
-        batch_points.append(points[b_i_inds].copy())
+        selector = image_inds == b_i
+        batch_boxes.append(boxes[selector])
+        batch_points.append(points[selector])
 
-    batch_boxes, batch_points = np.array(batch_boxes), np.array(batch_points)
+    batch_boxes, batch_points = torch.stack(batch_boxes), torch.stack(batch_points)
 
     return batch_boxes, batch_points
 
@@ -218,64 +215,9 @@ def generateBoundingBox(reg, probs, scale, thresh):
     return boundingbox, image_inds
 
 
-def nms_numpy(boxes, scores, threshold, method):
-    if boxes.size == 0:
-        return np.empty((0, 3))
 
-    x1 = boxes[:, 0].copy()
-    y1 = boxes[:, 1].copy()
-    x2 = boxes[:, 2].copy()
-    y2 = boxes[:, 3].copy()
-    s = scores
-    area = (x2 - x1 + 1) * (y2 - y1 + 1)
-
-    I = np.argsort(s)
-    pick = np.zeros_like(s, dtype=np.int16)
-    counter = 0
-    while I.size > 0:
-        i = I[-1]
-        pick[counter] = i
-        counter += 1
-        idx = I[0:-1]
-
-        xx1 = np.maximum(x1[i], x1[idx]).copy()
-        yy1 = np.maximum(y1[i], y1[idx]).copy()
-        xx2 = np.minimum(x2[i], x2[idx]).copy()
-        yy2 = np.minimum(y2[i], y2[idx]).copy()
-
-        w = np.maximum(0.0, xx2 - xx1 + 1).copy()
-        h = np.maximum(0.0, yy2 - yy1 + 1).copy()
-
-        inter = w * h
-        if method == 'Min':
-            o = inter / np.minimum(area[i], area[idx])
-        else:
-            o = inter / (area[i] + area[idx] - inter)
-        I = I[np.where(o <= threshold)]
-
-    pick = pick[:counter].copy()
-    return pick
-
-
-def batched_nms_numpy(boxes, scores, idxs, threshold, method):
-    device = boxes.device
-    if boxes.numel() == 0:
-        return torch.empty((0,), dtype=torch.int64, device=device)
-    # strategy: in order to perform NMS independently per class.
-    # we add an offset to all the boxes. The offset is dependent
-    # only on the class idx, and is large enough so that boxes
-    # from different classes do not overlap
-    max_coordinate = boxes.max()
-    offsets = idxs.to(boxes) * (max_coordinate + 1)
-    boxes_for_nms = boxes + offsets[:, None]
-    boxes_for_nms = boxes_for_nms.cpu().numpy()
-    scores = scores.cpu().numpy()
-    keep = nms_numpy(boxes_for_nms, scores, threshold, method)
-    return torch.as_tensor(keep, dtype=torch.long, device=device)
-
-
-def pad(boxes, w, h):
-    boxes = boxes.trunc().int().cpu().numpy()
+def pad(boxes, size):
+    boxes = boxes.trunc().int()
     x = boxes[:, 0]
     y = boxes[:, 1]
     ex = boxes[:, 2]
@@ -283,8 +225,8 @@ def pad(boxes, w, h):
 
     x[x < 1] = 1
     y[y < 1] = 1
-    ex[ex > w] = w
-    ey[ey > h] = h
+    ex[ex > size[1]] = size[1]
+    ey[ey > size[0]] = size[0]
 
     return y, ey, x, ex
 
@@ -302,6 +244,8 @@ def rerec(bboxA):
 
 
 def imresample(img, sz):
+    if isinstance(sz,torch.Tensor):
+      sz = tuple(sz.type(torch.int32).tolist())
     im_data = interpolate(img, size=sz, mode="area")
     return im_data
 
