@@ -299,24 +299,7 @@ def extract_face(img, box, image_size=160, margin=0, save_path=None):
     Returns:
         torch.tensor -- tensor representing the extracted face.
     """
-    margin = [
-        margin * (box[2] - box[0]) / (image_size - margin),
-        margin * (box[3] - box[1]) / (image_size - margin),
-    ]
-    raw_image_size = get_size(img)
-    box = [
-        int(max(box[0] - margin[0] / 2, 0)),
-        int(max(box[1] - margin[1] / 2, 0)),
-        int(min(box[2] + margin[0] / 2, raw_image_size[0])),
-        int(min(box[3] + margin[1] / 2, raw_image_size[1])),
-    ]
-
-    face = crop_resize(img, box, image_size)
-
-    if save_path is not None:
-        os.makedirs(os.path.dirname(save_path) + "/", exist_ok=True)
-        save_img(face, save_path)
-
-    face = F.to_tensor(np.float32(face))
+    
+    face = F.resized_crop(img.permute(2, 1, 0), top=int(box[0]), left=int(box[1]), height=int(box[2]-box[0]), width=int(box[3]-box[1]), size=(image_size,image_size))
 
     return face
