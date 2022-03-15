@@ -300,10 +300,11 @@ def extract_face(img, box, image_size=160, margin=0, save_path=None):
         torch.tensor -- tensor representing the extracted face.
     """
     
-    top = int(box[1])
-    left = int(box[0])
-    height = int(box[3]-box[1])
-    width = int(box[2]-box[0])
+    box = box.trunc().int()
+    top = box[1].item()
+    left = box[0].item()
+    height = (box[3]-box[1]).item()
+    width = (box[2]-box[0]).item()
     
     face = F.resized_crop(img.permute(2, 0, 1), top=top, left=left, height=height, width=width, size=(image_size,image_size))
 
